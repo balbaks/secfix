@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -75,7 +76,12 @@ def apply_and_verify_patch(
             notes=patch_result.notes,
         )
 
-    branch_name = f"secfix/{target_file.stem}-{int(time.time())}"
+    # int(time.time()) alone only has 1-second resolution: two findings
+    # processed within the same wall-clock second collide on branch name,
+    # and the resulting "branch already exists" error looks unrelated to its
+    # real cause. A short random suffix makes collisions practically
+    # impossible regardless of how fast findings are processed.
+    branch_name = f"secfix/{target_file.stem}-{int(time.time())}-{uuid.uuid4().hex[:6]}"
     checkout = _run_git(repo_root, "checkout", "-b", branch_name)
     if checkout.returncode != 0:
         return PatchApplyResult(
