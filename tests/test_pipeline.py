@@ -50,3 +50,14 @@ def test_vulnerable_fixture_confirmed(tmp_path):
 def test_safe_fixture_not_reproduced(tmp_path):
     result = _run_pipeline("tests/fixtures/safe_example.py", 12, 12, tmp_path)
     assert result.verdict == sqli.VERDICT_NOT_REPRODUCED
+
+
+def test_half_fixed_fixture_still_confirmed(tmp_path):
+    """A function where one of two queries was fixed but the other wasn't must
+    still come back CONFIRMED — the oracle must not stop at the first safe
+    query and declare victory."""
+    result = _run_pipeline("tests/fixtures/half_fixed_example.py", 14, 17, tmp_path)
+    assert result.verdict == sqli.VERDICT_CONFIRMED
+    assert "SECFIX_TAINT_" in result.offending_sql
+    # The offending SQL is the second (still-vulnerable) query, not the first.
+    assert "audit_log" in result.offending_sql
