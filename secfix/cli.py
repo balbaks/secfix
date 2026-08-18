@@ -20,9 +20,11 @@ import sys
 import tempfile
 from pathlib import Path
 
-from secfix.findings import load_sqli_findings
-from secfix.harness.python_sqli import generate_harness
+import secfix.harness.python_cmdi as cmdi_harness
+import secfix.harness.python_sqli as sqli_harness
+from secfix.findings import load_cmdi_findings, load_sqli_findings
 from secfix.models import ModelError, PatchContext, generate_patch
+from secfix.oracle import cmdi as oracle_cmdi
 from secfix.oracle import sqli as oracle_sqli
 from secfix.patch import KIND_VALIDATED, apply_and_verify_patch
 from secfix.report import build_pr_body, build_report, write_report_to_disk
@@ -74,13 +76,35 @@ def _open_pr(repo_root: Path, branch_name: str, pr_body_path: Path) -> None:
         print(gh.stdout.strip())
 
 
+# Per-rule dispatch: the reproduction pipeline (finding-loading, harness
+# generation, oracle evaluation) is fully generic across vuln classes, so
+# adding a rule only means adding an entry here. Patch generation and
+# report writing are still sqli-only (see the CONFIRMED branch below) —
+# secfix.models's prompt and secfix.report's wording are both written for
+# SQL injection specifically and out of scope to generalize here.
+_RULE_CONFIG = {
+    "sqli": {
+        "load_findings": load_sqli_findings,
+        "generate_harness": sqli_harness.generate_harness,
+        "oracle": oracle_sqli,
+    },
+    "cmdi": {
+        "load_findings": load_cmdi_findings,
+        "generate_harness": cmdi_harness.generate_harness,
+        "oracle": oracle_cmdi,
+    },
+}
+
+
 def run_command(args: argparse.Namespace) -> int:
     repo_root = Path(args.repo).resolve()
     finding_path = Path(args.finding)
+    rule_config = _RULE_CONFIG[args.rule]
+    oracle_module = rule_config["oracle"]
 
-    findings = load_sqli_findings(finding_path, repo_root)
+    findings = rule_config["load_findings"](finding_path, repo_root)
     if not findings:
-        print("No SQLi findings in input.")
+        print(f"No {args.rule} findings in input.")
         return 0
 
     original_branch = _current_branch(repo_root)
@@ -97,7 +121,7 @@ def run_command(args: argparse.Namespace) -> int:
             continue
 
         workdir = Path(tempfile.mkdtemp(prefix="secfix_"))
-        harness_result = generate_harness(target, workdir)
+        harness_result = rule_config["generate_harness"](target, workdir)
         if harness_result.kind != "generated":
             print(f"UNCERTAIN (harness skipped): {harness_result.reason}")
             continue
@@ -118,14 +142,24 @@ def run_command(args: argparse.Namespace) -> int:
             continue
 
         trace = trace_from_json(sandbox_result.trace_path.read_text())
-        verdict = oracle_sqli.evaluate(trace, harness_result.sentinel)
+        verdict = oracle_module.evaluate(trace, harness_result.sentinel)
         print(f"Oracle verdict: {verdict.verdict} — {verdict.detail}")
 
         finding_output_dir = output_root / f"finding_{i + 1}"
         patch_apply_result = None
 
-        if verdict.verdict == oracle_sqli.VERDICT_CONFIRMED:
-            print(f"Offending SQL: {verdict.offending_sql}")
+        if verdict.verdict == oracle_module.VERDICT_CONFIRMED:
+            label = "Offending SQL" if args.rule == "sqli" else "Offending command"
+            print(f"{label}: {verdict.offending_sql}")
+
+            if args.rule != "sqli":
+                print(
+                    f"Patch generation and report writing for --rule {args.rule} are "
+                    "not yet implemented (v0.1.0 supports patch generation for sqli "
+                    "only) — the verdict above is the full result for this finding."
+                )
+                exit_status = 1
+                continue
 
             context = PatchContext(
                 finding_summary=finding.message or finding.rule_id,
@@ -192,12 +226,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="secfix")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    run_parser = sub.add_parser("run", help="Validate and patch SQL-injection findings")
+    run_parser = sub.add_parser("run", help="Validate (and, for sqli, patch) supported findings")
     run_parser.add_argument("--finding", required=True, help="Path to a Semgrep JSON results file")
     run_parser.add_argument("--repo", required=True, help="Path to the local, authorized target repo")
     run_parser.add_argument(
-        "--rule", default="sqli", choices=["sqli"],
-        help="Finding class to process (fixed to sqli in v0.1.0)",
+        "--rule", default="sqli", choices=["sqli", "cmdi"],
+        help="Finding class to process. Patch generation is sqli-only in v0.1.0; "
+        "cmdi reproduces/confirms only.",
     )
     run_parser.add_argument(
         "--sandbox", choices=["docker", "local"], default="docker",

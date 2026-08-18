@@ -9,6 +9,17 @@ from pathlib import Path
 # Kept intentionally simple/explicit for v0.1.0 rather than a fuzzy matcher.
 SQLI_RULE_MARKERS = ("sql-injection", "sqli", "sql_injection", "tainted-sql")
 
+# Same approach for OS command injection.
+CMDI_RULE_MARKERS = (
+    "command-injection",
+    "cmdi",
+    "command_injection",
+    "os-command-injection",
+    "shell-injection",
+    "dangerous-system-call",
+    "subprocess-shell-true",
+)
+
 
 @dataclass
 class Finding:
@@ -23,6 +34,11 @@ class Finding:
     def is_sqli(self) -> bool:
         rule = self.rule_id.lower()
         return any(marker in rule for marker in SQLI_RULE_MARKERS)
+
+    @property
+    def is_cmdi(self) -> bool:
+        rule = self.rule_id.lower()
+        return any(marker in rule for marker in CMDI_RULE_MARKERS)
 
 
 def _extract_span(repo_root: Path, file_path: str, start_line: int, end_line: int) -> str:
@@ -67,3 +83,7 @@ def load_findings(finding_json_path: Path, repo_root: Path) -> list[Finding]:
 
 def load_sqli_findings(finding_json_path: Path, repo_root: Path) -> list[Finding]:
     return [f for f in load_findings(finding_json_path, repo_root) if f.is_sqli]
+
+
+def load_cmdi_findings(finding_json_path: Path, repo_root: Path) -> list[Finding]:
+    return [f for f in load_findings(finding_json_path, repo_root) if f.is_cmdi]
