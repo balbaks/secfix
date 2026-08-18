@@ -94,18 +94,29 @@ def apply_and_verify_patch(
     diff_text = patch_result.diff if patch_result.diff.endswith("\n") else patch_result.diff + "\n"
     patch_file.write_text(diff_text)
 
+    # Strict check first. Model-generated diffs routinely have correct context
+    # but arithmetic-wrong @@ hunk line counts (an LLM miscounting lines is
+    # normal); --recount recomputes those counts from the hunk body and
+    # rescues an otherwise-correct patch that --check alone would reject as
+    # "corrupt patch". It does NOT rescue a hunk whose declared location is
+    # actually wrong, so this is a legitimate fallback, not a laxer check.
     check = _run_git(repo_root, "apply", "--check", str(patch_file))
     if check.returncode != 0:
-        return PatchApplyResult(
-            kind=KIND_FAILED,
-            detail=f"patch does not apply cleanly: {check.stderr.strip()}",
-            branch_name=branch_name,
-            diff=patch_result.diff,
-            explanation=patch_result.explanation,
-            notes=patch_result.notes,
-        )
+        recount_check = _run_git(repo_root, "apply", "--check", "--recount", str(patch_file))
+        if recount_check.returncode != 0:
+            return PatchApplyResult(
+                kind=KIND_FAILED,
+                detail=f"patch does not apply cleanly: {check.stderr.strip()}",
+                branch_name=branch_name,
+                diff=patch_result.diff,
+                explanation=patch_result.explanation,
+                notes=patch_result.notes,
+            )
+        apply_args = ["--recount"]
+    else:
+        apply_args = []
 
-    apply_ = _run_git(repo_root, "apply", str(patch_file))
+    apply_ = _run_git(repo_root, "apply", *apply_args, str(patch_file))
     if apply_.returncode != 0:
         return PatchApplyResult(
             kind=KIND_FAILED,
