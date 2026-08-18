@@ -129,11 +129,13 @@ def run_command(args: argparse.Namespace) -> int:
 
             context = PatchContext(
                 finding_summary=finding.message or finding.rule_id,
-                vulnerable_snippet=finding.code_span,
                 file_path=str(finding.file_path),
                 harness_source=harness_result.source,
                 offending_sql=verdict.offending_sql,
                 oracle_detail=verdict.detail,
+                full_source=target.source_file.read_text(),
+                function_start_line=target.lineno,
+                function_end_line=target.end_lineno,
             )
 
             try:
