@@ -7,10 +7,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
+
+_FENCE_ALL_RE = re.compile(r"```[a-zA-Z]*\n(.*?)```", re.DOTALL)
+_DIFF_HEADER_RE = re.compile(r"^(---|\+\+\+|diff --git) ", re.MULTILINE)
 
 DIFF_MARKER = "=== DIFF ==="
 EXPLANATION_MARKER = "=== EXPLANATION ==="
@@ -85,6 +89,28 @@ Respond in EXACTLY this format, nothing else:
 """
 
 
+def _extract_diff(diff_raw: str) -> str:
+    """diff_raw may embed the diff directly, or wrap it (and possibly other,
+    non-diff context) in one or more fenced code blocks. If any fenced
+    blocks are present, exactly one of them must look like a unified diff
+    (a ---/+++ header pair or a `diff --git` line) — zero or multiple such
+    blocks is ambiguous and must raise rather than silently falling through
+    to raw, unparsed text that would corrupt `git apply`.
+    """
+    blocks = _FENCE_ALL_RE.findall(diff_raw)
+    if not blocks:
+        return diff_raw.strip()
+
+    qualifying = [b.strip() for b in blocks if _DIFF_HEADER_RE.search(b)]
+    if len(qualifying) != 1:
+        raise ModelError(
+            "expected exactly one fenced code block containing a unified diff "
+            f"(---/+++ or diff --git headers) in the model response, found "
+            f"{len(qualifying)} (out of {len(blocks)} fenced block(s) total)"
+        )
+    return qualifying[0]
+
+
 def _parse_response(text: str) -> PatchResult:
     if DIFF_MARKER not in text or EXPLANATION_MARKER not in text:
         raise ModelError(
@@ -93,7 +119,8 @@ def _parse_response(text: str) -> PatchResult:
 
     diff_start = text.index(DIFF_MARKER) + len(DIFF_MARKER)
     explanation_start = text.index(EXPLANATION_MARKER)
-    diff = text[diff_start:explanation_start].strip()
+    diff_raw = text[diff_start:explanation_start].strip()
+    diff = _extract_diff(diff_raw)
 
     if NOTES_MARKER in text:
         notes_start = text.index(NOTES_MARKER)

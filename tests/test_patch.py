@@ -7,7 +7,7 @@ from pathlib import Path
 
 from secfix.findings import Finding
 from secfix.models import PatchResult
-from secfix.patch import KIND_VALIDATED, apply_and_verify_patch
+from secfix.patch import KIND_FAILED, KIND_VALIDATED, apply_and_verify_patch
 from secfix.repo import analyze_finding
 from secfix.sandbox.local import LocalSandbox
 
@@ -77,3 +77,57 @@ def test_miscounted_hunk_header_recovered_via_recount(tmp_path):
     )
 
     assert result.kind == KIND_VALIDATED, result.detail
+
+
+def test_partial_patch_not_validated(tmp_path):
+    """Two queries share the tainted param; a diff that parameterizes only
+    the first must NOT come back validated, because the second query still
+    lets the sentinel reach raw SQL.
+    """
+    target_rel = "vuln_target.py"
+    repo_root = _init_scratch_repo(tmp_path, "two_query_vulnerable_example.py", target_rel)
+    original = (repo_root / target_rel).read_text()
+
+    # Build a real git diff that fixes only the first query, by editing the
+    # working tree and letting git compute it (guarantees the diff is in a
+    # form `git apply` will accept), then restoring the original so
+    # apply_and_verify_patch starts from a clean, unpatched HEAD.
+    partially_fixed = original.replace(
+        '''cursor.execute("SELECT * FROM users WHERE name = '%s'" % name)''',
+        '''cursor.execute("SELECT * FROM users WHERE name = ?", (name,))''',
+    )
+    assert partially_fixed != original  # sanity: the replace actually matched
+    (repo_root / target_rel).write_text(partially_fixed)
+    diff_text = subprocess.run(
+        ["git", "diff"], cwd=repo_root, check=True, capture_output=True, text=True
+    ).stdout
+    subprocess.run(["git", "checkout", "-q", "--", target_rel], cwd=repo_root, check=True)
+
+    finding = Finding(
+        rule_id="python.lang.security.audit.sql-injection",
+        message="tainted string used to build a SQL query",
+        file_path=Path(target_rel),
+        start_line=15,
+        end_line=16,
+        code_span="",
+    )
+    target = analyze_finding(finding, repo_root)
+    assert target.kind == "supported", getattr(target, "reason", None)
+
+    patch_result = PatchResult(
+        diff=diff_text,
+        explanation="parameterized the first query only",
+        notes="second query left interpolated on purpose, to exercise the failure path",
+    )
+    sandbox = LocalSandbox(repo_root, i_understand_local_is_unsafe=True)
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+
+    result = apply_and_verify_patch(
+        repo_root, Path(target_rel), target, patch_result, sandbox, workdir
+    )
+
+    assert result.kind != KIND_VALIDATED
+    assert result.kind == KIND_FAILED
+    assert "STILL interpolated" in result.detail
+    assert "audit_log" in result.detail
