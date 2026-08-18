@@ -4,6 +4,11 @@ Each test exercises a real response shape a model might emit: clean, prefaced
 with prose, diff wrapped in a fenced code block, extra blank lines, missing
 NOTES section, etc.
 """
+import json
+import urllib.error
+from contextlib import contextmanager
+from unittest.mock import patch
+
 import pytest
 
 from secfix.models import (
@@ -11,6 +16,8 @@ from secfix.models import (
     EXPLANATION_MARKER,
     NOTES_MARKER,
     ModelError,
+    PatchContext,
+    _groq_generate_patch,
     _parse_response,
 )
 
@@ -222,3 +229,71 @@ def test_completely_empty_raises():
 def test_only_prose_raises():
     with pytest.raises(ModelError):
         _parse_response("The fix is to use parameterized queries.")
+
+
+# ---------------------------------------------------------------------------
+# Groq provider: HTTP request/response shape and error handling, fully
+# mocked (no network, no GROQ_API_KEY). Confirms the OpenAI-compatible
+# response text is routed through the exact same _parse_response/
+# _extract_diff path as every other provider.
+# ---------------------------------------------------------------------------
+
+_CONTEXT = PatchContext(
+    finding_summary="tainted string used to build a SQL query",
+    vulnerable_snippet="query = 'SELECT * FROM users WHERE id = %s' % uid",
+    file_path="app.py",
+    harness_source="",
+    offending_sql="SELECT * FROM users WHERE id = 'SECFIX_TAINT_deadbeef'",
+    oracle_detail="tainted sentinel was found interpolated directly into an executed SQL string",
+)
+
+
+@contextmanager
+def _fake_response(payload: dict):
+    class _Resp:
+        def read(self):
+            return json.dumps(payload).encode()
+
+    yield _Resp()
+
+
+def test_groq_generate_patch_parses_wrapped_diff():
+    # Groq/OpenAI-compatible models wrap diffs in fences + prose exactly like
+    # Anthropic models do; this proves that messy shape survives unchanged.
+    content = (
+        "Sure, here's the fix:\n\n"
+        f"{DIFF_MARKER}\n```diff\n{_DIFF}\n```\n{EXPLANATION_MARKER}\n{_EXPLANATION}\n"
+        f"{NOTES_MARKER}\n{_NOTES}\n"
+    )
+    fake_payload = {"choices": [{"message": {"content": content}}]}
+
+    with patch("secfix.models.urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.return_value = _fake_response(fake_payload)
+        result = _groq_generate_patch(_CONTEXT, api_key="test-groq-key")
+
+    assert result.diff == _DIFF
+    assert result.explanation == _EXPLANATION
+
+    # Assert the request shape: OpenAI-compatible endpoint, Bearer auth,
+    # messages array — not the Anthropic shape.
+    request = mock_urlopen.call_args[0][0]
+    assert request.full_url == "https://api.groq.com/openai/v1/chat/completions"
+    assert request.get_header("Authorization") == "Bearer test-groq-key"
+    sent_body = json.loads(request.data)
+    assert sent_body["messages"] == [{"role": "user", "content": sent_body["messages"][0]["content"]}]
+    assert "x-api-key" not in {h.lower() for h in request.headers}
+
+
+def test_groq_generate_patch_401_raises_model_error():
+    error = urllib.error.HTTPError(
+        url="https://api.groq.com/openai/v1/chat/completions",
+        code=401,
+        msg="Unauthorized",
+        hdrs=None,
+        fp=None,
+    )
+    error.read = lambda: b'{"error": {"message": "Invalid API Key"}}'
+
+    with patch("secfix.models.urllib.request.urlopen", side_effect=error):
+        with pytest.raises(ModelError, match="Groq API error 401"):
+            _groq_generate_patch(_CONTEXT, api_key="bad-key")

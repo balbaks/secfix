@@ -202,7 +202,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Execution sandbox (docker is mandatory for non-fixture code)",
     )
     run_parser.add_argument(
-        "--model", default="anthropic", choices=["anthropic", "ollama"],
+        "--model", default="anthropic", choices=["anthropic", "groq", "ollama"],
         help="Patch-generation model provider",
     )
     run_parser.add_argument(

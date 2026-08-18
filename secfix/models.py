@@ -1,7 +1,8 @@
 """Swappable model boundary for patch generation. One entry point,
-`generate_patch`, dispatches to a cloud provider (Anthropic, default) or a
-local one (Ollama). No SDK dependency: both providers are plain HTTP calls
-via urllib so secfix stays dependency-light.
+`generate_patch`, dispatches to a cloud provider (Anthropic, default;
+or Groq, OpenAI-compatible) or a local one (Ollama). No SDK dependency:
+all providers are plain HTTP calls via urllib so secfix stays
+dependency-light.
 """
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ EXPLANATION_MARKER = "=== EXPLANATION ==="
 NOTES_MARKER = "=== NOTES ==="
 
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
+DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 DEFAULT_OLLAMA_MODEL = "codellama"
 
 
@@ -48,9 +50,13 @@ class ModelError(RuntimeError):
 def generate_patch(context: PatchContext, provider: str = "anthropic", **kwargs: Any) -> PatchResult:
     if provider == "anthropic":
         return _anthropic_generate_patch(context, **kwargs)
+    if provider == "groq":
+        return _groq_generate_patch(context, **kwargs)
     if provider == "ollama":
         return _ollama_generate_patch(context, **kwargs)
-    raise ValueError(f"unknown model provider: {provider!r} (expected 'anthropic' or 'ollama')")
+    raise ValueError(
+        f"unknown model provider: {provider!r} (expected 'anthropic', 'groq', or 'ollama')"
+    )
 
 
 def _build_prompt(context: PatchContext) -> str:
@@ -167,6 +173,51 @@ def _anthropic_generate_patch(
         raise ModelError(f"failed to reach Anthropic API: {e}") from e
 
     text = "".join(block.get("text", "") for block in payload.get("content", []))
+    return _parse_response(text)
+
+
+def _groq_generate_patch(
+    context: PatchContext, model: str = DEFAULT_GROQ_MODEL, api_key: str | None = None
+) -> PatchResult:
+    api_key = api_key or os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        raise ModelError("GROQ_API_KEY is not set")
+
+    body = json.dumps(
+        {
+            "model": model,
+            "max_tokens": 2048,
+            "messages": [{"role": "user", "content": _build_prompt(context)}],
+        }
+    ).encode()
+
+    request = urllib.request.Request(
+        "https://api.groq.com/openai/v1/chat/completions",
+        data=body,
+        headers={
+            "content-type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            # Groq's endpoint sits behind Cloudflare, which WAF-blocks the
+            # default "Python-urllib/x.y" User-Agent as bot traffic (403,
+            # Cloudflare error code 1010) before the request ever reaches
+            # Groq's auth layer. Any non-default value clears it.
+            "User-Agent": "secfix/0.1.0",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as resp:
+            payload = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise ModelError(f"Groq API error {e.code}: {e.read().decode(errors='replace')}") from e
+    except urllib.error.URLError as e:
+        raise ModelError(f"failed to reach Groq API: {e}") from e
+
+    # OpenAI-compatible chat-completions response shape: the message text we
+    # feed to _parse_response/_extract_diff is identical in kind to what the
+    # Anthropic path produces, so the same messy-wrapper handling (fenced
+    # blocks, prose preambles, ambiguous-block fail-loud) applies unchanged.
+    text = payload["choices"][0]["message"]["content"]
     return _parse_response(text)
 
 
