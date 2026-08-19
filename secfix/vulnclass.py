@@ -67,7 +67,15 @@ CMDI = VulnClass(
         'argv list (e.g. `["ping", "-c", "1", host]`) and pass it to subprocess with '
         "shell=False (the default) — never use os.system, never subprocess with "
         "shell=True, and never string-interpolate untrusted input into a shell command "
-        "string."
+        "string. Escaping or quoting the input is not a fix and must not be used instead "
+        "of shell=False. The function you return must be complete and runnable exactly as "
+        "written, with no missing names: it is spliced back in as a drop-in replacement "
+        "for only this function, so nothing outside it (including its module's top-level "
+        "imports) can be changed. If your fix needs a name — a module, a class, anything — "
+        "that isn't already available inside the original function, import or define it as "
+        "part of the function body itself; never reference a name without also making it "
+        "resolvable from within the function. Conversely, don't add an import or "
+        "assignment the rewritten function body no longer uses."
     ),
     impact_text=(
         "An attacker who controls the tainted parameter can inject arbitrary shell "
