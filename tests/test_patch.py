@@ -5,8 +5,11 @@ under test creates branches and commits).
 import subprocess
 from pathlib import Path
 
+import secfix.harness.python_cmdi as cmdi_harness
+import secfix.vulnclass as vulnclass
 from secfix.findings import Finding
 from secfix.models import PatchResult
+from secfix.oracle import cmdi as oracle_cmdi
 from secfix.patch import KIND_FAILED, KIND_VALIDATED, apply_and_verify_patch
 from secfix.repo import analyze_finding
 from secfix.sandbox.local import LocalSandbox
@@ -129,5 +132,67 @@ def test_partial_patch_not_validated(tmp_path):
 
     assert result.kind != KIND_VALIDATED
     assert result.kind == KIND_FAILED
-    assert "STILL interpolated" in result.detail
+    assert "STILL reproducible" in result.detail
     assert "audit_log" in result.detail
+
+
+def test_cmdi_argv_rewrite_validated(tmp_path):
+    """Closes the loop for cmdi: a diff that rewrites os.system(f"...") to
+    subprocess.run([...], shell=False) must apply via plain `git apply
+    --check` (well-formed by construction, same as sqli) and must come back
+    VALIDATED once re-verified with the cmdi harness/oracle — the sentinel
+    reaches the sink only as an argv element, never a shell-parsed string.
+    """
+    target_rel = "vuln_target.py"
+    repo_root = _init_scratch_repo(tmp_path, "vulnerable_cmdi_example.py", target_rel)
+    original = (repo_root / target_rel).read_text()
+
+    # Build a real git diff by editing the working tree and letting git
+    # compute it (guarantees the diff is in a form `git apply` will
+    # accept), then restoring the original so apply_and_verify_patch starts
+    # from a clean, unpatched HEAD — same technique as the sqli tests above.
+    fixed = original.replace("import os", "import subprocess").replace(
+        'return os.system(f"ping -c 1 {host}")',
+        'return subprocess.run(["ping", "-c", "1", host], shell=False)',
+    )
+    assert fixed != original  # sanity: both replacements actually matched
+    (repo_root / target_rel).write_text(fixed)
+    diff_text = subprocess.run(
+        ["git", "diff"], cwd=repo_root, check=True, capture_output=True, text=True
+    ).stdout
+    subprocess.run(["git", "checkout", "-q", "--", target_rel], cwd=repo_root, check=True)
+
+    finding = Finding(
+        rule_id="python.lang.security.audit.dangerous-system-call",
+        message="tainted string used to build a shell command",
+        file_path=Path(target_rel),
+        start_line=9,
+        end_line=9,
+        code_span="",
+    )
+    target = analyze_finding(finding, repo_root)
+    assert target.kind == "supported", getattr(target, "reason", None)
+
+    patch_result = PatchResult(
+        diff=diff_text,
+        explanation="rewrote os.system to subprocess.run with an argv list and shell=False",
+        notes="",
+    )
+    sandbox = LocalSandbox(repo_root, i_understand_local_is_unsafe=True)
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+
+    result = apply_and_verify_patch(
+        repo_root,
+        Path(target_rel),
+        target,
+        patch_result,
+        sandbox,
+        workdir,
+        generate_harness_fn=cmdi_harness.generate_harness,
+        oracle_module=oracle_cmdi,
+        vuln_name=vulnclass.CMDI.name,
+    )
+
+    assert result.kind == KIND_VALIDATED, result.detail
+    assert "argv element" in result.detail  # oracle_cmdi's own not_reproduced wording, reused verbatim

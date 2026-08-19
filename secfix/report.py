@@ -6,12 +6,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from secfix.findings import Finding
-from secfix.oracle.sqli import OracleResult
 from secfix.patch import PatchApplyResult
 from secfix.repo import HarnessTarget
+from secfix.vulnclass import VulnClass
 
 
 def _redact_sentinel(sql: str, sentinel: str) -> str:
@@ -21,20 +21,21 @@ def _redact_sentinel(sql: str, sentinel: str) -> str:
 def build_report(
     finding: Finding,
     target: HarnessTarget,
-    oracle_result: OracleResult,
+    oracle_result: Any,  # duck-typed OracleResult — oracle.sqli/oracle.cmdi share the shape
     sentinel: str,
     patch_result: Optional[PatchApplyResult],
+    vuln_class: VulnClass,
 ) -> str:
     offending_sql = oracle_result.offending_sql or ""
     redacted_sql = _redact_sentinel(offending_sql, sentinel) if offending_sql else "N/A"
 
     lines = [
-        f"# SQL Injection: {target.function_name} ({finding.file_path})",
+        f"# {vuln_class.title}: {target.function_name} ({finding.file_path})",
         "",
         "## Summary",
-        f"secfix reproduced a SQL-injection finding (`{finding.rule_id}`) at runtime by "
+        f"secfix reproduced {vuln_class.finding_kind_phrase} (`{finding.rule_id}`) at runtime by "
         f"passing a unique tainted sentinel into `{target.function_name}` and observing it "
-        "land, unescaped, inside an executed SQL string. This is a runtime confirmation, "
+        f"land, unescaped, inside {vuln_class.sink_description}. This is a runtime confirmation, "
         "not a static-analysis inference.",
         "",
         "## Affected component",
@@ -49,19 +50,15 @@ def build_report(
         ),
         "",
         "## Impact",
-        "An attacker who controls the tainted parameter can inject arbitrary SQL, "
-        "potentially reading, modifying, or deleting data beyond the query's intended "
-        "scope, or bypassing application logic enforced only at the query level.",
+        vuln_class.impact_text,
         "",
         "## Reproduction",
         "1. A unique sentinel (`SECFIX_TAINT_<8hex>`, redacted below as `<TAINTED_INPUT>`) "
         "was passed as the tainted argument.",
-        "2. The function's DB access path was replaced with a recording mock — no real "
-        "database, network, or seed data was used.",
-        "3. The mock observed the following query executed with the sentinel interpolated "
-        "directly into the SQL text (not passed as a bound parameter):",
+        f"2. {vuln_class.mock_step_text}",
+        f"3. {vuln_class.mock_observation_text}",
         "",
-        "```sql",
+        f"```{vuln_class.code_fence_lang}",
         redacted_sql,
         "```",
         "",
@@ -91,9 +88,11 @@ def build_report(
     return "\n".join(lines)
 
 
-def build_pr_body(finding: Finding, target: HarnessTarget, patch_result: PatchApplyResult) -> str:
+def build_pr_body(
+    finding: Finding, target: HarnessTarget, patch_result: PatchApplyResult, vuln_class: VulnClass
+) -> str:
     return (
-        f"## SQL injection fix: `{target.function_name}` in `{finding.file_path}`\n\n"
+        f"## {vuln_class.title} fix: `{target.function_name}` in `{finding.file_path}`\n\n"
         "secfix reproduced this finding at runtime (see attached report) and generated "
         "and verified a fix via the same trace-based oracle.\n\n"
         f"**Verification:** {patch_result.kind} — {patch_result.detail}\n\n"
@@ -115,6 +114,7 @@ def write_report_to_disk(
     output_dir: Path,
     report_text: str,
     branch_name: str,
+    vuln_class: VulnClass,
     pr_body: Optional[str] = None,
     open_pr: bool = False,
 ) -> DiskOutput:
@@ -136,7 +136,7 @@ def write_report_to_disk(
         # with a publish suggestion attached, printed or otherwise.
         push_cmd = f"git push -u origin {branch_name}"
         gh_cmd = (
-            f'gh pr create --title "secfix: SQL injection fix ({branch_name})" '
+            f'gh pr create --title "secfix: {vuln_class.title} fix ({branch_name})" '
             f"--body-file {pr_body_path}"
         )
         next_steps = (

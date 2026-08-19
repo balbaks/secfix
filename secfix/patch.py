@@ -1,8 +1,10 @@
 """Apply a model-generated patch to a scratch branch and re-verify it using
 the same sentinel/trace mechanism that confirmed the original finding —
 never by re-reading the source. A patch is only "validated" if a fresh
-harness run shows the sentinel has moved out of the executed SQL string and
-into bound params.
+harness run shows the sentinel is no longer reproducible per the oracle
+for the finding's vuln class (rule-agnostic: callers supply which
+harness/oracle to re-verify with, defaulting to sqli's for backward
+compatibility with existing callers).
 """
 from __future__ import annotations
 
@@ -11,10 +13,11 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Callable
 
-from secfix.harness.python_sqli import generate_harness
+import secfix.harness.python_sqli as _sqli_harness
 from secfix.models import PatchResult
-from secfix.oracle import sqli
+from secfix.oracle import sqli as _sqli_oracle
 from secfix.repo import HarnessTarget
 from secfix.sandbox.base import Sandbox
 from secfix.trace import trace_from_json
@@ -66,6 +69,9 @@ def apply_and_verify_patch(
     patch_result: PatchResult,
     sandbox: Sandbox,
     workdir: Path,
+    generate_harness_fn: Callable[[HarnessTarget, Path], Any] = _sqli_harness.generate_harness,
+    oracle_module: Any = _sqli_oracle,
+    vuln_name: str = "SQL injection",
 ) -> PatchApplyResult:
     if not _diff_touches_only(patch_result.diff, target_file):
         return PatchApplyResult(
@@ -129,7 +135,7 @@ def apply_and_verify_patch(
 
     _run_git(repo_root, "add", str(target_file))
     commit = _run_git(
-        repo_root, "commit", "-m", f"secfix: patch SQL injection in {target_file}"
+        repo_root, "commit", "-m", f"secfix: patch {vuln_name} in {target_file}"
     )
     if commit.returncode != 0:
         return PatchApplyResult(
@@ -141,7 +147,7 @@ def apply_and_verify_patch(
             notes=patch_result.notes,
         )
 
-    harness_result = generate_harness(target, workdir)
+    harness_result = generate_harness_fn(target, workdir)
     if harness_result.kind != "generated":
         return PatchApplyResult(
             kind=KIND_NEEDS_MANUAL_REVIEW,
@@ -171,23 +177,23 @@ def apply_and_verify_patch(
         )
 
     trace = trace_from_json(sandbox_result.trace_path.read_text())
-    verdict = sqli.evaluate(trace, harness_result.sentinel)
+    verdict = oracle_module.evaluate(trace, harness_result.sentinel)
 
-    if verdict.verdict == sqli.VERDICT_NOT_REPRODUCED:
+    if verdict.verdict == oracle_module.VERDICT_NOT_REPRODUCED:
         return PatchApplyResult(
             kind=KIND_VALIDATED,
-            detail="post-patch trace confirms the sentinel now reaches the DB only via "
-            "bound params, never interpolated into SQL",
+            detail=f"post-patch trace confirms the fix: {verdict.detail}",
             branch_name=branch_name,
             diff=patch_result.diff,
             explanation=patch_result.explanation,
             notes=patch_result.notes,
         )
 
-    if verdict.verdict == sqli.VERDICT_CONFIRMED:
+    if verdict.verdict == oracle_module.VERDICT_CONFIRMED:
         return PatchApplyResult(
             kind=KIND_FAILED,
-            detail=f"patch applied but the sentinel is STILL interpolated into SQL: {verdict.offending_sql}",
+            detail=f"patch applied but the vulnerability is STILL reproducible: "
+            f"{verdict.detail} — offending: {verdict.offending_sql}",
             branch_name=branch_name,
             diff=patch_result.diff,
             explanation=patch_result.explanation,

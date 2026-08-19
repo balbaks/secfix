@@ -22,6 +22,7 @@ from pathlib import Path
 
 import secfix.harness.python_cmdi as cmdi_harness
 import secfix.harness.python_sqli as sqli_harness
+import secfix.vulnclass as vulnclass
 from secfix.findings import load_cmdi_findings, load_sqli_findings
 from secfix.models import ModelError, PatchContext, generate_patch
 from secfix.oracle import cmdi as oracle_cmdi
@@ -50,7 +51,7 @@ def _build_sandbox(args: argparse.Namespace, repo_root: Path) -> Sandbox:
     return LocalSandbox(repo_root, i_understand_local_is_unsafe=args.i_understand_local_is_unsafe)
 
 
-def _open_pr(repo_root: Path, branch_name: str, pr_body_path: Path) -> None:
+def _open_pr(repo_root: Path, branch_name: str, pr_body_path: Path, vuln_class: vulnclass.VulnClass) -> None:
     push = subprocess.run(
         ["git", "-C", str(repo_root), "push", "-u", "origin", branch_name],
         capture_output=True,
@@ -63,7 +64,7 @@ def _open_pr(repo_root: Path, branch_name: str, pr_body_path: Path) -> None:
     gh = subprocess.run(
         [
             "gh", "pr", "create",
-            "--title", f"secfix: SQL injection fix ({branch_name})",
+            "--title", f"secfix: {vuln_class.title} fix ({branch_name})",
             "--body-file", str(pr_body_path),
         ],
         cwd=str(repo_root),
@@ -77,21 +78,22 @@ def _open_pr(repo_root: Path, branch_name: str, pr_body_path: Path) -> None:
 
 
 # Per-rule dispatch: the reproduction pipeline (finding-loading, harness
-# generation, oracle evaluation) is fully generic across vuln classes, so
-# adding a rule only means adding an entry here. Patch generation and
-# report writing are still sqli-only (see the CONFIRMED branch below) —
-# secfix.models's prompt and secfix.report's wording are both written for
-# SQL injection specifically and out of scope to generalize here.
+# generation, oracle evaluation) AND patch generation/reporting are both
+# fully generic across vuln classes now — adding a rule means adding an
+# entry here plus a VulnClass in secfix.vulnclass with that rule's
+# class-appropriate remediation guidance and report wording.
 _RULE_CONFIG = {
     "sqli": {
         "load_findings": load_sqli_findings,
         "generate_harness": sqli_harness.generate_harness,
         "oracle": oracle_sqli,
+        "vuln_class": vulnclass.SQLI,
     },
     "cmdi": {
         "load_findings": load_cmdi_findings,
         "generate_harness": cmdi_harness.generate_harness,
         "oracle": oracle_cmdi,
+        "vuln_class": vulnclass.CMDI,
     },
 }
 
@@ -148,18 +150,10 @@ def run_command(args: argparse.Namespace) -> int:
         finding_output_dir = output_root / f"finding_{i + 1}"
         patch_apply_result = None
 
-        if verdict.verdict == oracle_module.VERDICT_CONFIRMED:
-            label = "Offending SQL" if args.rule == "sqli" else "Offending command"
-            print(f"{label}: {verdict.offending_sql}")
+        vuln_class = rule_config["vuln_class"]
 
-            if args.rule != "sqli":
-                print(
-                    f"Patch generation and report writing for --rule {args.rule} are "
-                    "not yet implemented (v0.1.0 supports patch generation for sqli "
-                    "only) — the verdict above is the full result for this finding."
-                )
-                exit_status = 1
-                continue
+        if verdict.verdict == oracle_module.VERDICT_CONFIRMED:
+            print(f"Offending {vuln_class.sink_noun}: {verdict.offending_sql}")
 
             context = PatchContext(
                 finding_summary=finding.message or finding.rule_id,
@@ -170,20 +164,36 @@ def run_command(args: argparse.Namespace) -> int:
                 full_source=target.source_file.read_text(),
                 function_start_line=target.lineno,
                 function_end_line=target.end_lineno,
+                vuln_name=vuln_class.name,
+                sink_description=vuln_class.sink_description,
+                sink_noun=vuln_class.sink_noun,
+                remediation_guidance=vuln_class.remediation_guidance,
             )
 
             try:
                 patch_result = generate_patch(context, provider=args.model)
             except ModelError as e:
                 print(f"Patch generation failed: {e}")
-                report_text = build_report(finding, target, verdict, harness_result.sentinel, None)
-                disk = write_report_to_disk(finding_output_dir, report_text, branch_name="")
+                report_text = build_report(
+                    finding, target, verdict, harness_result.sentinel, None, vuln_class
+                )
+                disk = write_report_to_disk(
+                    finding_output_dir, report_text, branch_name="", vuln_class=vuln_class
+                )
                 print(f"Report written to {disk.report_path}")
                 exit_status = 1
                 continue
 
             patch_apply_result = apply_and_verify_patch(
-                repo_root, finding.file_path, target, patch_result, sandbox, workdir
+                repo_root,
+                finding.file_path,
+                target,
+                patch_result,
+                sandbox,
+                workdir,
+                generate_harness_fn=rule_config["generate_harness"],
+                oracle_module=oracle_module,
+                vuln_name=vuln_class.name,
             )
             print(f"Patch status: {patch_apply_result.kind} — {patch_apply_result.detail}")
 
@@ -197,25 +207,28 @@ def run_command(args: argparse.Namespace) -> int:
             if patch_apply_result.kind != KIND_VALIDATED:
                 exit_status = 1
 
-        report_text = build_report(finding, target, verdict, harness_result.sentinel, patch_apply_result)
+        report_text = build_report(
+            finding, target, verdict, harness_result.sentinel, patch_apply_result, vuln_class
+        )
 
         pr_body = None
         should_open_pr = False
         if patch_apply_result is not None and patch_apply_result.kind == KIND_VALIDATED:
-            pr_body = build_pr_body(finding, target, patch_apply_result)
+            pr_body = build_pr_body(finding, target, patch_apply_result, vuln_class)
             should_open_pr = args.open_pr
 
         disk = write_report_to_disk(
             finding_output_dir,
             report_text,
             branch_name=patch_apply_result.branch_name if patch_apply_result else "",
+            vuln_class=vuln_class,
             pr_body=pr_body,
             open_pr=should_open_pr,
         )
         print(f"Report written to {disk.report_path}")
 
         if should_open_pr:
-            _open_pr(repo_root, patch_apply_result.branch_name, disk.pr_body_path)
+            _open_pr(repo_root, patch_apply_result.branch_name, disk.pr_body_path, vuln_class)
         else:
             print(disk.next_steps)
 
@@ -226,13 +239,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="secfix")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    run_parser = sub.add_parser("run", help="Validate (and, for sqli, patch) supported findings")
+    run_parser = sub.add_parser("run", help="Validate and patch supported findings")
     run_parser.add_argument("--finding", required=True, help="Path to a Semgrep JSON results file")
     run_parser.add_argument("--repo", required=True, help="Path to the local, authorized target repo")
     run_parser.add_argument(
         "--rule", default="sqli", choices=["sqli", "cmdi"],
-        help="Finding class to process. Patch generation is sqli-only in v0.1.0; "
-        "cmdi reproduces/confirms only.",
+        help="Finding class to process (sql-injection or os-command-injection)",
     )
     run_parser.add_argument(
         "--sandbox", choices=["docker", "local"], default="docker",

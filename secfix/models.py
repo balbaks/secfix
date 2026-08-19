@@ -47,6 +47,13 @@ class PatchContext:
     full_source: str
     function_start_line: int
     function_end_line: int
+    # Per-vuln-class prompt text (from secfix.vulnclass.VulnClass), resolved
+    # by the caller so this module stays decoupled from any rule registry —
+    # it just renders whatever class-appropriate strings it's handed.
+    vuln_name: str  # e.g. "SQL-injection" — "a confirmed {vuln_name} vulnerability"
+    sink_description: str  # e.g. "an executed SQL string"
+    sink_noun: str  # e.g. "query" — "Observed injectable {sink_noun}:"
+    remediation_guidance: str  # full sentence(s), e.g. "Fix the vulnerability by..."
 
 
 @dataclass
@@ -88,10 +95,10 @@ def _build_prompt(context: PatchContext) -> str:
     lines, start_idx, end_idx = _function_lines(context)
     function_source = "".join(lines[start_idx:end_idx])
 
-    return f"""You are fixing a confirmed SQL-injection vulnerability in an authorized \
+    return f"""You are fixing a confirmed {context.vuln_name} vulnerability in an authorized \
 security engagement. The vulnerability was CONFIRMED by runtime reproduction, not \
 static analysis: a unique sentinel value was passed into the function below and \
-observed landing directly inside the executed SQL string.
+observed landing directly inside {context.sink_description}.
 
 File: {context.file_path}
 
@@ -101,14 +108,12 @@ The full, original function (lines {context.function_start_line}-{context.functi
 
 Finding: {context.finding_summary}
 
-Observed injectable query (sentinel redacted as SENTINEL):
+Observed injectable {context.sink_noun} (sentinel redacted as SENTINEL):
 {context.offending_sql}
 
 Oracle detail: {context.oracle_detail}
 
-Fix the vulnerability by converting the query to use parameterized/bound \
-placeholders (e.g. `?` or `%s` passed via the DB API's `params` argument) \
-instead of string interpolation. Preserve the function's signature, name, \
+{context.remediation_guidance} Preserve the function's signature, name, \
 and all unrelated behavior exactly — change only what's needed to fix the \
 injection.
 

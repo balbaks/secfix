@@ -20,6 +20,7 @@ from unittest.mock import patch
 
 import pytest
 
+import secfix.vulnclass as vulnclass
 from secfix.models import (
     EXPLANATION_MARKER,
     FIXED_FUNCTION_MARKER,
@@ -84,6 +85,10 @@ _CONTEXT = PatchContext(
     full_source=_ORIGINAL_FILE,
     function_start_line=_FUNCTION_START_LINE,
     function_end_line=_FUNCTION_END_LINE,
+    vuln_name=vulnclass.SQLI.name,
+    sink_description=vulnclass.SQLI.sink_description,
+    sink_noun=vulnclass.SQLI.sink_noun,
+    remediation_guidance=vulnclass.SQLI.remediation_guidance,
 )
 
 
