@@ -20,6 +20,16 @@ CMDI_RULE_MARKERS = (
     "subprocess-shell-true",
 )
 
+# Same approach for path traversal.
+PATHTRAVERSAL_RULE_MARKERS = (
+    "path-traversal",
+    "pathtraversal",
+    "path_traversal",
+    "directory-traversal",
+    "path-injection",
+    "tainted-path",
+)
+
 
 @dataclass
 class Finding:
@@ -39,6 +49,11 @@ class Finding:
     def is_cmdi(self) -> bool:
         rule = self.rule_id.lower()
         return any(marker in rule for marker in CMDI_RULE_MARKERS)
+
+    @property
+    def is_pathtraversal(self) -> bool:
+        rule = self.rule_id.lower()
+        return any(marker in rule for marker in PATHTRAVERSAL_RULE_MARKERS)
 
 
 def _extract_span(repo_root: Path, file_path: str, start_line: int, end_line: int) -> str:
@@ -87,3 +102,7 @@ def load_sqli_findings(finding_json_path: Path, repo_root: Path) -> list[Finding
 
 def load_cmdi_findings(finding_json_path: Path, repo_root: Path) -> list[Finding]:
     return [f for f in load_findings(finding_json_path, repo_root) if f.is_cmdi]
+
+
+def load_pathtraversal_findings(finding_json_path: Path, repo_root: Path) -> list[Finding]:
+    return [f for f in load_findings(finding_json_path, repo_root) if f.is_pathtraversal]

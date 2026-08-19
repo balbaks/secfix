@@ -21,11 +21,13 @@ import tempfile
 from pathlib import Path
 
 import secfix.harness.python_cmdi as cmdi_harness
+import secfix.harness.python_pathtraversal as pathtraversal_harness
 import secfix.harness.python_sqli as sqli_harness
 import secfix.vulnclass as vulnclass
-from secfix.findings import load_cmdi_findings, load_sqli_findings
+from secfix.findings import load_cmdi_findings, load_pathtraversal_findings, load_sqli_findings
 from secfix.models import ModelError, PatchContext, generate_patch
 from secfix.oracle import cmdi as oracle_cmdi
+from secfix.oracle import pathtraversal as oracle_pathtraversal
 from secfix.oracle import sqli as oracle_sqli
 from secfix.patch import KIND_VALIDATED, apply_and_verify_patch
 from secfix.report import build_pr_body, build_report, write_report_to_disk
@@ -94,6 +96,12 @@ _RULE_CONFIG = {
         "generate_harness": cmdi_harness.generate_harness,
         "oracle": oracle_cmdi,
         "vuln_class": vulnclass.CMDI,
+    },
+    "pathtraversal": {
+        "load_findings": load_pathtraversal_findings,
+        "generate_harness": pathtraversal_harness.generate_harness,
+        "oracle": oracle_pathtraversal,
+        "vuln_class": vulnclass.PATHTRAVERSAL,
     },
 }
 
@@ -243,8 +251,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--finding", required=True, help="Path to a Semgrep JSON results file")
     run_parser.add_argument("--repo", required=True, help="Path to the local, authorized target repo")
     run_parser.add_argument(
-        "--rule", default="sqli", choices=["sqli", "cmdi"],
-        help="Finding class to process (sql-injection or os-command-injection)",
+        "--rule", default="sqli", choices=["sqli", "cmdi", "pathtraversal"],
+        help="Finding class to process (sql-injection, os-command-injection, or path-traversal)",
     )
     run_parser.add_argument(
         "--sandbox", choices=["docker", "local"], default="docker",
