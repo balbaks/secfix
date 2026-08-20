@@ -7,9 +7,22 @@ from pathlib import Path
 
 # Substrings matched against a Semgrep rule id to decide "this is SQLi".
 # Kept intentionally simple/explicit for v0.1.0 rather than a fuzzy matcher.
-SQLI_RULE_MARKERS = ("sql-injection", "sqli", "sql_injection", "tainted-sql")
+# Registry rules don't all spell it "sql-injection" — e.g. Django's raw-query
+# audit rule (python.django.security.audit.raw-query.avoid-raw-sql) flags
+# raw SQL without ever using the word "injection", so "raw-sql"/"raw-query"
+# are included alongside the more literal markers.
+SQLI_RULE_MARKERS = (
+    "sql-injection",
+    "sqli",
+    "sql_injection",
+    "tainted-sql",
+    "raw-sql",
+    "raw-query",
+)
 
-# Same approach for OS command injection.
+# Same approach for OS command injection. Registry rules here include
+# subprocess-injection.subprocess-injection and the python.lang.security.audit
+# dangerous-subprocess-use family, neither of which say "command-injection".
 CMDI_RULE_MARKERS = (
     "command-injection",
     "cmdi",
@@ -18,9 +31,14 @@ CMDI_RULE_MARKERS = (
     "shell-injection",
     "dangerous-system-call",
     "subprocess-shell-true",
+    "subprocess-injection",
+    "dangerous-subprocess-use",
 )
 
-# Same approach for path traversal.
+# Same approach for path traversal. "traversal" alone (no "path-" prefix)
+# catches registry rules like the Express resolve/join traversal audit
+# (...express-path-join-resolve-traversal) that the more specific markers
+# below would miss.
 PATHTRAVERSAL_RULE_MARKERS = (
     "path-traversal",
     "pathtraversal",
@@ -28,6 +46,7 @@ PATHTRAVERSAL_RULE_MARKERS = (
     "directory-traversal",
     "path-injection",
     "tainted-path",
+    "traversal",
 )
 
 
