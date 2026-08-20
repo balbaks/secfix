@@ -35,10 +35,13 @@ CMDI_RULE_MARKERS = (
     "dangerous-subprocess-use",
 )
 
-# Same approach for path traversal. "traversal" alone (no "path-" prefix)
-# catches registry rules like the Express resolve/join traversal audit
-# (...express-path-join-resolve-traversal) that the more specific markers
-# below would miss.
+# Same approach for path traversal. Unlike SQLI/CMDI above, our pygoat scan
+# had zero path-traversal findings, so there's no real registry rule id to
+# calibrate a broadening against. Left as the known Python spellings only
+# (uncalibrated) rather than guessing a broad catch-all like a bare
+# "traversal" - secfix only targets Python, and a bare substring like that
+# would also match non-Python rule ids (e.g. JS/Express traversal rules),
+# which would be a false-accept here.
 PATHTRAVERSAL_RULE_MARKERS = (
     "path-traversal",
     "pathtraversal",
