@@ -4,3 +4,10 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .secfix_out/
+
+.env
+.env.*
+*.key
+*_key
+*_key.*
+*.pem
