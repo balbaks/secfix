@@ -8,6 +8,7 @@ harness onto them.
 from __future__ import annotations
 
 import ast
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -43,6 +44,11 @@ class HarnessTarget:
     # to embed in the generated harness. A value of None means "unknown type,
     # cannot default" -> the harness must skip.
     benign_defaults: dict = None
+    # Dotted settings module (e.g. "pygoat.settings") if repo_root looks like
+    # a Django project (has a top-level manage.py naming one), else None. When
+    # set, the harness must call django.setup() against it before importing
+    # the flagged module.
+    django_settings_module: Optional[str] = None
 
 
 class _EnclosingFinder(ast.NodeVisitor):
@@ -221,6 +227,7 @@ def analyze_finding(finding: Finding, repo_root: Path) -> "UnsupportedTarget | H
         db_access_kind=db_access_kind,
         db_access_name=db_access_name,
         benign_defaults=benign_defaults,
+        django_settings_module=_detect_django_settings_module(repo_root),
     )
 
 
@@ -229,3 +236,23 @@ def _dotted_path(rel_path: Path) -> str:
     if parts and parts[-1] == "__init__":
         parts = parts[:-1]
     return ".".join(parts)
+
+
+_DJANGO_SETTINGS_RE = re.compile(
+    r"""DJANGO_SETTINGS_MODULE['"]\s*,\s*['"]([\w.]+)['"]"""
+)
+
+
+def _detect_django_settings_module(repo_root: Path) -> Optional[str]:
+    """v0.1.0 Django detection: a top-level manage.py that calls
+    os.environ.setdefault('DJANGO_SETTINGS_MODULE', '<module>') is treated as
+    proof the target is a Django project, and that string is the settings
+    module the harness must set up against. No manage.py, or a manage.py that
+    doesn't spell this out in the conventional django-admin-generated form,
+    means "not detected" rather than a guess.
+    """
+    manage_py = repo_root / "manage.py"
+    if not manage_py.exists():
+        return None
+    match = _DJANGO_SETTINGS_RE.search(manage_py.read_text())
+    return match.group(1) if match else None
