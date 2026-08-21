@@ -200,6 +200,22 @@ Docker sandbox requirements: a locked-down container per run — setup phase
 (`docker run`) has `--network none`, a non-root user, read-only rootfs with a
 tmpfs `/tmp`, all capabilities dropped, and pid/memory/cpu limits.
 
+`examples/demo_sqli_finding.json` is a Semgrep-shaped finding against
+secfix's own `tests/fixtures/vulnerable_example.py`, for a self-contained
+run with no external target repo needed:
+
+```bash
+.venv/bin/pip install -e .
+# supply your own Anthropic API key
+export ANTHROPIC_API_KEY=...
+secfix run \
+  --finding examples/demo_sqli_finding.json \
+  --repo . \
+  --rule sqli \
+  --sandbox docker \
+  --model anthropic
+```
+
 ## Development
 
 ```bash
