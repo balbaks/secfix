@@ -42,6 +42,15 @@ def _as_text(output: str | bytes | None) -> str:
 _DOCKERFILE_TEMPLATE = """\
 FROM {base_image}
 WORKDIR /workspace
+# Some targets (e.g. pygoat's psycopg2==2.9.3) build C extensions that need
+# a compiler and libpq headers, absent from the slim base image. Setup phase
+# already has network access, so installing them here is free — but this
+# runs on every build, for every target, whether or not it needs to compile
+# anything. TODO: make this conditional (e.g. only when requirements.txt
+# has a package known to need native compilation) instead of paying the
+# apt-get cost unconditionally.
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential libpq-dev \\
+    && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt /workspace/requirements.txt
 RUN pip install --no-cache-dir pytest -r requirements.txt
 COPY repo/ /workspace/
@@ -58,7 +67,7 @@ class DockerSandbox(Sandbox):
         memory: str = "256m",
         cpus: str = "1",
         pids_limit: int = 128,
-        setup_timeout: int = 300,
+        setup_timeout: int = 600,
         execute_timeout: int = 60,
     ):
         self.repo_root = Path(repo_root)
