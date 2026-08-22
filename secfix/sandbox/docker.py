@@ -24,6 +24,7 @@ from pathlib import Path
 
 from secfix.harness.python_sqli import TRACE_END_MARKER, TRACE_FILENAME, TRACE_START_MARKER
 from secfix.sandbox.base import Sandbox, SandboxResult
+from secfix.sandbox.pyversion import detect_base_image
 
 
 def _as_text(output: str | bytes | None) -> str:
@@ -63,7 +64,7 @@ class DockerSandbox(Sandbox):
     def __init__(
         self,
         repo_root: Path,
-        base_image: str = "python:3.11-slim",
+        base_image: str | None = None,
         memory: str = "256m",
         cpus: str = "1",
         pids_limit: int = 128,
@@ -71,7 +72,7 @@ class DockerSandbox(Sandbox):
         execute_timeout: int = 60,
     ):
         self.repo_root = Path(repo_root)
-        self.base_image = base_image
+        self.base_image = base_image or detect_base_image(self.repo_root)
         self.memory = memory
         self.cpus = cpus
         self.pids_limit = pids_limit
