@@ -13,6 +13,7 @@ import secrets
 from dataclasses import dataclass
 from pathlib import Path
 
+from secfix.harness.django_bootstrap import django_bootstrap_lines
 from secfix.repo import HarnessTarget
 
 TRACE_FILENAME = "secfix_trace.json"
@@ -183,6 +184,7 @@ def _render_source(target: HarnessTarget, sentinel: str, trace_output_path: Path
         "",
         "",
         f"def test_sqli_repro(monkeypatch):",
+        *django_bootstrap_lines(target),
         f"    import {target.module_import_path} as _target_module",
         "",
         "    conn = _RecordingConnection()",

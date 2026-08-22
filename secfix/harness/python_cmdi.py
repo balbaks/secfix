@@ -19,6 +19,7 @@ import secrets
 from dataclasses import dataclass
 from pathlib import Path
 
+from secfix.harness.django_bootstrap import django_bootstrap_lines
 from secfix.repo import HarnessTarget
 
 TRACE_FILENAME = "secfix_trace.json"
@@ -157,31 +158,6 @@ def generate_harness(target: HarnessTarget, workdir: Path) -> HarnessResult:
     )
 
 
-def _django_bootstrap_lines(target: HarnessTarget) -> list[str]:
-    """v0.1.0 spike: module-import-time framework coupling (settings, app
-    registry) is the wall documented in the README as secfix's real gap on
-    web-framework code. For a detected Django target, get past just enough of
-    that wall to attempt import: point DJANGO_SETTINGS_MODULE at the app's
-    own settings and call django.setup(). DATABASE_URL is pre-set to an
-    in-memory sqlite DSN (only if the settings module doesn't already
-    override it) as a best-effort fallback for settings that read DB config
-    from the environment (dj_database_url / django-heroku convention) —
-    setup() itself never opens a DB connection, so this only matters if the
-    settings module's own import-time code does. Settings that hardcode a
-    non-sqlite DATABASES dict are out of scope for this spike.
-    """
-    if not target.django_settings_module:
-        return []
-    return [
-        "    import os as _secfix_os",
-        f"    _secfix_os.environ.setdefault('DJANGO_SETTINGS_MODULE', {target.django_settings_module!r})",
-        "    _secfix_os.environ.setdefault('DATABASE_URL', 'sqlite://:memory:')",
-        "    import django as _secfix_django",
-        "    _secfix_django.setup()",
-        "",
-    ]
-
-
 def _render_source(target: HarnessTarget, sentinel: str, trace_output_path: Path) -> str:
     kwargs_items = [f"    {name!r}: {literal}," for name, literal in (target.benign_defaults or {}).items()]
     kwargs_items.append(f"    {target.tainted_param!r}: SENTINEL,")
@@ -195,7 +171,7 @@ def _render_source(target: HarnessTarget, sentinel: str, trace_output_path: Path
         "",
         "",
         f"def test_cmdi_repro(monkeypatch):",
-        *_django_bootstrap_lines(target),
+        *django_bootstrap_lines(target),
         f"    import {target.module_import_path} as _target_module",
         "    import os",
         "    import subprocess",
