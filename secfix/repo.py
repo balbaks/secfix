@@ -36,6 +36,9 @@ class HarnessTarget:
     # How the function obtains its DB handle:
     #   "param"          -> db_access_name is a parameter that takes the mock connection
     #   "module_getter"  -> db_access_name is a module-level callable to monkeypatch
+    #   "module_attr"    -> db_access_name is a module-level object (e.g. Django's
+    #                       `connection`) whose .cursor() is called directly; monkeypatch
+    #                       the object itself, not a getter function
     #   "unknown"        -> could not determine; harness should skip
     db_access_kind: str = "unknown"
     db_access_name: str = ""
@@ -123,6 +126,12 @@ def _guess_tainted_param(
 
 CONN_PARAM_NAMES = {"conn", "connection", "cursor", "cur", "db"}
 CONN_GETTER_NAMES = {"get_connection", "get_conn", "get_db", "get_db_connection", "connect"}
+# e.g. Django's `from django.db import connection; connection.cursor()` —
+# the module-level object itself is the connection, not a getter function
+# that returns one. Kept narrow to .cursor() specifically (v0.1.0 spike,
+# added for django.nV's finding) rather than a broader attribute-call
+# heuristic that would risk false-matching unrelated methods.
+CONN_ATTR_METHODS = {"cursor"}
 
 
 def _guess_db_access(func: ast.FunctionDef) -> tuple[str, str]:
@@ -135,6 +144,15 @@ def _guess_db_access(func: ast.FunctionDef) -> tuple[str, str]:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             if node.func.id in CONN_GETTER_NAMES:
                 return "module_getter", node.func.id
+
+    for node in ast.walk(func):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in CONN_ATTR_METHODS
+            and isinstance(node.func.value, ast.Name)
+        ):
+            return "module_attr", node.func.value.id
 
     return "unknown", ""
 

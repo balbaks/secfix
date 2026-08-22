@@ -168,6 +168,10 @@ def _render_source(target: HarnessTarget, sentinel: str, trace_output_path: Path
             f"    monkeypatch.setattr(_target_module, {target.db_access_name!r}, "
             f"lambda *a, **k: conn)\n"
         )
+    elif target.db_access_kind == "module_attr":
+        monkeypatch_line = (
+            f"    monkeypatch.setattr(_target_module, {target.db_access_name!r}, conn)\n"
+        )
 
     kwargs_block = "\n".join(kwargs_items)
 
