@@ -23,6 +23,7 @@ import uuid
 from pathlib import Path
 
 from secfix.harness.python_sqli import TRACE_END_MARKER, TRACE_FILENAME, TRACE_START_MARKER
+from secfix.repo import _detect_django_settings_module
 from secfix.sandbox.base import Sandbox, SandboxResult
 from secfix.sandbox.pyversion import detect_base_image
 
@@ -55,9 +56,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 COPY requirements.txt /workspace/requirements.txt
 RUN pip install --no-cache-dir pytest -r requirements.txt
 COPY repo/ /workspace/
-RUN useradd --create-home --uid 10001 secfix
+{django_migrate_line}RUN useradd --create-home --uid 10001 secfix
 USER secfix
 """
+
+# Wall D spike: EXECUTE's rootfs is read-only, so a Django target's sqlite
+# DB (settings.py hardcodes a file path, not ':memory:') has to exist BEFORE
+# EXECUTE starts, or ORM reads (e.g. Model.objects.get(...)) fail with
+# "no such table" — django_bootstrap.py's django.setup() never runs
+# migrations itself. Baking `manage.py migrate` into the image during SETUP
+# (still writable) gives EXECUTE a real, pre-migrated schema to read from;
+# a plain read against that baked-in file doesn't need write access, only
+# uncommitted writes (e.g. the sink itself) would, and those are
+# monkeypatched out before they'd touch it. Gated on the same manage.py
+# detection as the bootstrap, so non-Django targets never pay for a migrate
+# step that would just fail with "no such file: manage.py".
+_DJANGO_MIGRATE_LINE = "RUN python manage.py migrate --noinput\n"
 
 
 class DockerSandbox(Sandbox):
@@ -70,11 +84,22 @@ class DockerSandbox(Sandbox):
         pids_limit: int = 128,
         setup_timeout: int = 600,
         execute_timeout: int = 60,
+        django_seed_command: str | None = None,
     ):
+        # django_seed_command: spike-only escape hatch (Wall D), NOT a
+        # general mechanism. A single shell command run during SETUP, after
+        # migrate, before the image is frozen - lets a specific finding's
+        # driver bake in the exact row(s) its view needs (e.g. a Project
+        # with a given pk), because EXECUTE's read-only rootfs means any row
+        # written at test-run time instead of build time fails with
+        # "attempt to write a readonly database". There's no generic model
+        # of "what row does this view need" here; the caller supplies the
+        # command outright.
         self.repo_root = Path(repo_root)
         self.base_image = base_image or detect_base_image(self.repo_root)
         self.memory = memory
         self.cpus = cpus
+        self.django_seed_command = django_seed_command
         self.pids_limit = pids_limit
         self.setup_timeout = setup_timeout
         self.execute_timeout = execute_timeout
@@ -137,7 +162,14 @@ class DockerSandbox(Sandbox):
         )
         shutil.copy2(harness_path, repo_copy / harness_filename)
 
-        dockerfile = _DOCKERFILE_TEMPLATE.format(base_image=self.base_image)
+        django_migrate_line = ""
+        if _detect_django_settings_module(self.repo_root):
+            django_migrate_line = _DJANGO_MIGRATE_LINE
+            if self.django_seed_command:
+                django_migrate_line += f"RUN {self.django_seed_command}\n"
+        dockerfile = _DOCKERFILE_TEMPLATE.format(
+            base_image=self.base_image, django_migrate_line=django_migrate_line
+        )
         (build_ctx / "Dockerfile").write_text(dockerfile)
 
         try:
