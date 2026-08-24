@@ -52,6 +52,13 @@ class HarnessTarget:
     # set, the harness must call django.setup() against it before importing
     # the flagged module.
     django_settings_module: Optional[str] = None
+    # Set when the tainted param is a Django request object and the taint
+    # enters through request.POST/GET/FILES rather than the param itself
+    # being the tainted value. {"request_param": "request", "dict_name":
+    # "POST", "key": "name"}. When set, the harness must build a real
+    # HttpRequest (e.g. via django.test.RequestFactory) with SENTINEL under
+    # that key, instead of passing SENTINEL as the param value directly.
+    request_taint: Optional[dict] = None
 
 
 class _EnclosingFinder(ast.NodeVisitor):
@@ -91,6 +98,72 @@ class _EnclosingFinder(ast.NodeVisitor):
         self.stack.append(node)
         self.generic_visit(node)
         self.stack.pop()
+
+
+_REQUEST_DATA_DICTS = {"POST", "GET", "FILES"}
+
+
+def _string_const(node: ast.AST) -> Optional[str]:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _detect_request_taint(
+    func: ast.FunctionDef, span_start: int, span_end: int
+) -> Optional[dict]:
+    """Detect the Django-view shape: taint enters via request.POST/GET/FILES
+    rather than through a scalar parameter directly. Narrow by design (v0.1.0
+    spike) - only matches a parameter literally named 'request' (the Django
+    convention for the first positional arg of a view), and only a direct
+    `.get('key')` call or `['key']` subscript on one of the three request
+    data dicts, within the finding span. Anything more indirect (taint
+    reaching the sink through a variable assigned from request data
+    elsewhere in the function, a custom request-like wrapper, etc.) is not
+    detected and falls back to the scalar-param guess, which will likely
+    crash the harness - that's a real limit, not silently papered over.
+    """
+    param_names = {a.arg for a in func.args.args}
+    if "request" not in param_names:
+        return None
+
+    for node in ast.walk(func):
+        lineno = getattr(node, "lineno", None)
+        if lineno is None or not (span_start <= lineno <= span_end):
+            continue
+
+        # request.POST.get('key', ...)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and isinstance(node.func.value, ast.Attribute)
+            and node.func.value.attr in _REQUEST_DATA_DICTS
+            and isinstance(node.func.value.value, ast.Name)
+            and node.func.value.value.id == "request"
+            and node.args
+        ):
+            key = _string_const(node.args[0])
+            if key is not None:
+                return {"request_param": "request", "dict_name": node.func.value.attr, "key": key}
+
+        # request.POST['key']
+        if (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Attribute)
+            and node.value.attr in _REQUEST_DATA_DICTS
+            and isinstance(node.value.value, ast.Name)
+            and node.value.value.id == "request"
+        ):
+            slice_node = node.slice
+            # Python <3.9 wraps the subscript key in ast.Index.
+            if isinstance(slice_node, ast.Index):
+                slice_node = slice_node.value
+            key = _string_const(slice_node)
+            if key is not None:
+                return {"request_param": "request", "dict_name": node.value.attr, "key": key}
+
+    return None
 
 
 def _guess_tainted_param(
@@ -229,7 +302,11 @@ def analyze_finding(finding: Finding, repo_root: Path) -> "UnsupportedTarget | H
         )
 
     param_names = [a.arg for a in func.args.args]
-    tainted_param, assumed = _guess_tainted_param(func, finding.start_line, finding.end_line)
+    request_taint = _detect_request_taint(func, finding.start_line, finding.end_line)
+    if request_taint is not None:
+        tainted_param, assumed = request_taint["request_param"], False
+    else:
+        tainted_param, assumed = _guess_tainted_param(func, finding.start_line, finding.end_line)
     db_access_kind, db_access_name = _guess_db_access(func)
     benign_defaults = _compute_benign_defaults(func, tainted_param, db_access_kind, db_access_name)
 
@@ -246,6 +323,7 @@ def analyze_finding(finding: Finding, repo_root: Path) -> "UnsupportedTarget | H
         db_access_name=db_access_name,
         benign_defaults=benign_defaults,
         django_settings_module=_detect_django_settings_module(repo_root),
+        request_taint=request_taint,
     )
 
 

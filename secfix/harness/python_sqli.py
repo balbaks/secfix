@@ -157,9 +157,35 @@ def generate_harness(target: HarnessTarget, workdir: Path) -> HarnessResult:
     )
 
 
+def _request_taint_lines(target: HarnessTarget) -> list[str]:
+    """v0.1.0 spike: a Django view's tainted param is the request object
+    itself, not a scalar - the harness must build a real HttpRequest with
+    SENTINEL planted at the exact request.POST/GET/FILES key the finding
+    uses, rather than handing the view a bare string (which crashes at the
+    first request.method/request.POST access). django.test.RequestFactory
+    is used rather than a hand-rolled mock so .method, .POST, .GET, .FILES
+    all behave like the real thing - only the one tainted key is populated,
+    so a view reading any other request data it also needs (a second POST
+    field, a session, auth) is a separate, undetected gap, not silently
+    papered over.
+    """
+    rt = target.request_taint
+    if rt is None:
+        return []
+    method = "post" if rt["dict_name"] in ("POST", "FILES") else "get"
+    return [
+        "    from django.test import RequestFactory",
+        "    _secfix_rf = RequestFactory()",
+        f"    {rt['request_param']} = _secfix_rf.{method}('/', data={{{rt['key']!r}: SENTINEL}})",
+    ]
+
+
 def _render_source(target: HarnessTarget, sentinel: str, trace_output_path: Path) -> str:
     kwargs_items = [f"    {name!r}: {literal}," for name, literal in (target.benign_defaults or {}).items()]
-    kwargs_items.append(f"    {target.tainted_param!r}: SENTINEL,")
+    if target.request_taint is not None:
+        kwargs_items.append(f"    {target.tainted_param!r}: {target.request_taint['request_param']},")
+    else:
+        kwargs_items.append(f"    {target.tainted_param!r}: SENTINEL,")
 
     monkeypatch_line = ""
     if target.db_access_kind == "param":
@@ -189,6 +215,7 @@ def _render_source(target: HarnessTarget, sentinel: str, trace_output_path: Path
         "",
         "    conn = _RecordingConnection()",
         monkeypatch_line.rstrip("\n") if monkeypatch_line else "",
+        *_request_taint_lines(target),
         "",
         "    kwargs = {",
         kwargs_block,
